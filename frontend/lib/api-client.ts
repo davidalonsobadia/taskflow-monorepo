@@ -7,7 +7,27 @@ import { cookies } from "next/headers"
  * API Client Configuration
  */
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || "some-api-key"
+
+/**
+ * The backend API key, read from the server environment at request time.
+ *
+ * It must never use a `NEXT_PUBLIC_` name or live in a module that client
+ * components import (such as lib/config.ts): Next.js inlines those into the
+ * browser bundle. This module imports `next/headers`, so it cannot end up in
+ * client code.
+ *
+ * @throws Error if BACKEND_API_KEY is not set
+ */
+function getBackendApiKey(): string {
+  const apiKey = process.env.BACKEND_API_KEY
+  if (!apiKey) {
+    throw new Error(
+      "BACKEND_API_KEY is not set. Set it in the frontend server environment " +
+      "(e.g. frontend/.env) to an API key created with backend/scripts/create_api_client.py.",
+    )
+  }
+  return apiKey
+}
 
 /**
  * Custom error class for API errors
@@ -68,7 +88,7 @@ export async function apiFetch<T = any>(
   // Build headers
   const requestHeaders: Record<string, string> = {
     "Content-Type": "application/json",
-    "x-api-key": API_KEY,
+    "x-api-key": getBackendApiKey(),
     ...(headers as Record<string, string>),
   }
 

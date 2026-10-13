@@ -22,7 +22,7 @@ Human: merge PR #2 (one-time kick-off)
    ┌─────────────────────┐
    │    Implementer      │  reads issue + all comments (incl. failure context)
    │  (agent-implement   │  writes code + tests, runs checks on runner
-   │   .yml / Opus)      │  opens PR → arms auto-merge
+   │   .yml / Opus)      │  opens PR (never merges it)
    └──────────┬──────────┘
               │ PR opened on branch claude/issue-N
               ▼
@@ -30,8 +30,9 @@ Human: merge PR #2 (one-time kick-off)
    │  CI                  Agent - Review  │  run in parallel
    │  (ci.yml)            (agent-review   │
    │  ruff, alembic,      .yml / Sonnet)  │
-   │  pytest, eslint,     PASS or BLOCK   │
-   │  next build          verdict         │
+   │  pytest, eslint,     issue = spec,   │
+   │  next build          REVIEW.md rules │
+   │                      PASS or BLOCK   │
    └──────────────────────────────────────┘
               │
         ┌─────┴──────┐
@@ -39,7 +40,7 @@ Human: merge PR #2 (one-time kick-off)
       PASS         FAIL
         │            │
         ▼            ▼
-   auto-merge    auto-retry
+  agent-merge   auto-retry
    (squash)      (agent-auto-
         │         retry.yml)
         │            │
@@ -68,9 +69,10 @@ Human: merge PR #2 (one-time kick-off)
 
 | File | Trigger | Role |
 |---|---|---|
-| `agent-implement.yml` | `auto` label added to issue | Implements the issue, opens PR, arms auto-merge |
+| `agent-implement.yml` | `auto` label added to issue | Implements the issue and opens a PR; fails (and retries) if the run left no PR and no comment |
 | `ci.yml` | PR opened / updated | Lint, migrations, tests, frontend build |
-| `agent-review.yml` | PR opened / updated | Read-only code review — emits PASS or BLOCK |
+| `agent-review.yml` | PR opened / updated | Read-only review against the linked issue and `REVIEW.md` — inline comments, PASS or BLOCK |
+| `agent-merge.yml` | CI or Review run completed | Merges a `claude/issue-*` PR once CI and the review both passed on its head commit |
 | `agent-auto-retry.yml` | CI or Review workflow fails | Closes PR, posts failure context, re-triggers implementer |
 | `agent-advance-queue.yml` | `claude/issue-*` PR merged | Labels the next open issue `auto` |
 | `notify-merge.yml` | Any PR merged | Slack notification |
@@ -107,7 +109,7 @@ Go to **Settings → Secrets and variables → Actions** and add:
 
 | Secret | What it is | How to create |
 |---|---|---|
-| `PIPELINE_PAT` | Personal Access Token used to re-add the `auto` label so it fires the `issues:labeled` workflow trigger | See note below |
+| `PIPELINE_PAT` | Personal Access Token used to re-add the `auto` label (so it fires the `issues:labeled` trigger) and to merge passing PRs (so the merge fires the Advance Queue) | See note below |
 | `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token that authenticates the Claude Code GitHub Action | Generate at [claude.ai/settings](https://claude.ai/settings) under **Claude Code → GitHub Actions** |
 | `SLACK_WEBHOOK_URL` | Incoming webhook URL for merge/pipeline notifications | Create an Incoming Webhook app in your Slack workspace |
 
@@ -122,11 +124,11 @@ GitHub **silently suppresses** workflow triggers caused by the built-in `GITHUB_
 
 ### 2. Repository settings
 
-- **Settings → General → Pull Requests**: enable **Allow auto-merge**
-- **Settings → Branches → main**: add a branch protection rule with required status checks:
-  - `backend` (from `ci.yml`)
-  - `frontend` (from `ci.yml`)
-  - `review` (from `agent-review.yml`)
+None are required. `agent-merge.yml` is the merge gate, so the pipeline needs
+neither **Allow auto-merge** nor branch protection, which a private repository on
+GitHub's free plan cannot have. If your plan allows it, protecting `main` with the
+`backend`, `frontend` and `review` checks is an extra safeguard against a human
+merging a blocked PR by hand.
 
 ### 3. Issue labels
 
@@ -190,6 +192,29 @@ re-add `auto` manually whenever you want to process it.
 - **Branch lifecycle**: Each implementer run creates `claude/issue-N` from `main`.
   On failure, the retry workflow closes the PR and deletes the branch before re-triggering,
   so the implementer always starts from a clean branch off the latest `main`.
-- **Auto-merge arm**: The implementer runs `gh pr merge --auto --squash --delete-branch`
-  after opening the PR. This arms auto-merge but does not merge — CI and the Reviewer
-  still have to pass. The branch is deleted by GitHub on merge.
+- **Merge gate**: the implementer never merges (`gh pr merge` is in its disallowed
+  tools). `agent-merge.yml` runs after every CI and Agent - Review run, checks that
+  the latest run of both passed on the PR's current head commit, and squash-merges
+  with `--match-head-commit`, so a commit pushed after the checks is never merged
+  unchecked. It deletes the branch on merge. It and `agent-auto-retry.yml` ignore
+  branches from forks, which can also be named `claude/issue-N`.
+- **Reviewer inputs**: the review workflow saves the issue(s) the PR closes to
+  `.review-context/linked-issues.md`; that is the spec the Reviewer checks. `REVIEW.md`
+  supplies the project's invariants. A missing verdict fails the check (fail-closed);
+  a `review-verdict.txt` committed in the PR is deleted before the Reviewer runs.
+
+---
+
+## Generic vs project-specific files
+
+The pipeline is split so it can be copied into a project created from this
+template, or into an existing one, without rewriting it.
+
+| Kind | Files | What to do |
+|---|---|---|
+| Generic | `.claude/agents/reviewer.md`, `agent-review.yml`, `agent-merge.yml`, `agent-auto-retry.yml`, `agent-advance-queue.yml`, `agent-plan.yml`, `claude.yml`, `notify-merge.yml`, `.github/actions/slack-notify/`, `design/refs/README.md` | Copy as-is |
+| Stack-dependent | `.claude/agents/implementer.md`, `.claude/agents/planner.md`, `agent-implement.yml` | Copy, then adjust the toolchain: setup steps and check commands in `agent-implement.yml`, and the Alembic / pytest / pnpm mentions in the two agents |
+| Project-specific | `REVIEW.md`, `CLAUDE.md`, `ci.yml`, `.github/ISSUE_TEMPLATE/` | Write per project. `REVIEW.md` keeps its structure (IDs, severities, path map, "Do not flag") and grows from the project's own bugs |
+
+Everything the agents need to know about a project comes from `CLAUDE.md` and
+`REVIEW.md`; the generic files never name the project.

@@ -1,6 +1,7 @@
 name: CI
 
-# Required status checks for the protected `main` branch.
+# The checks agent-merge.yml waits for before merging a `claude/issue-*` PR
+# (`main` itself has no branch protection).
 # Runs on every PR and on direct pushes to main.
 on:
   pull_request:

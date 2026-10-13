@@ -121,7 +121,31 @@ frontend/
   will **not** fail on type errors. Do not rely on the build to catch them — keep
   types correct and run `pnpm lint`.
 
-## 6. Git & PR conventions (for autonomous agents)
+## 6. Design references for UI issues
+
+When a task should match a specific visual design (a mockup, screenshot, PDF spec,
+or HTML prototype), commit the file(s) into the repo under `design/refs/<key>/`
+rather than only linking an external URL or GitHub's issue-attachment CDN link —
+none of the pipeline agents have web access (`WebFetch`/`WebSearch` are
+intentionally disallowed for Planner, Implementer, and Reviewer), but
+`actions/checkout@v4` already gives every agent run the full repo, so a committed
+file is directly readable via the `Read` tool (which natively opens PNG/JPG and
+PDF, and reads `.html` as markup/CSS source).
+
+- Allowed types: `.png`, `.jpg`/`.jpeg`, `.pdf`, `.html`.
+- Link the exact path(s) under a `## Design references` section in the issue
+  body — this is the **authoritative** pointer agents follow; `design/refs/<issue-
+  number>/` is only the default drop location for the common case. See
+  `design/refs/README.md` for the full convention, epic/shared-reference handling,
+  and an example.
+- The Implementer treats a linked reference as the source of truth for visual
+  detail (layout, spacing, colors, copy, visible states) over its own
+  interpretation — see `.claude/agents/implementer.md`.
+- No auto-download of issue attachments, no headless-browser rendering, no Git
+  LFS — deliberately out of scope. Pre-rendering HTML mockups to PNG for pixel
+  fidelity is a possible future enhancement, not built now.
+
+## 7. Git & PR conventions (for autonomous agents)
 
 - One issue → one branch (`claude/issue-<n>`) → one Pull Request. Keep changes
   **scoped to the issue**; do not bundle unrelated refactors.
@@ -130,9 +154,19 @@ frontend/
   filter"). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are welcome.
 - Before opening a PR, run the relevant checks locally on the runner: backend
   `ruff check .` + tests; frontend `pnpm lint` + `pnpm build`.
-- `main` is protected: nothing merges unless CI passes.
+- `main` has no branch protection (a private repository on the free plan cannot
+  require checks, and the pipeline does not rely on it). For `claude/issue-*` PRs the
+  gate is `agent-merge.yml`: it merges only after CI and `Agent - Review` pass on the
+  PR head. Agents never merge their own PR.
+- Merging to `main` triggers nothing beyond CI today (deployment is out of scope,
+  §1). A project that deploys on every push to `main` says so here: the Implementer
+  reads this section to know what a merge sets off.
+- [`REVIEW.md`](REVIEW.md) lists what breaks in this codebase: invariants with IDs, a
+  path map, and a "Do not flag" list. Before changing a file, read the invariants
+  its path maps to; the Reviewer blocks on violations of `block` ones. A fix for a
+  bug that reached production adds or sharpens an invariant there in the same PR.
 
-## 7. Secrets
+## 8. Secrets
 
 - The real `backend/.env` and `frontend/.env` are git-ignored and must never be
   committed. Use `.env.example` for documenting non-sensitive defaults.

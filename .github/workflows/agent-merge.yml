@@ -1,0 +1,102 @@
+name: Agent - Merge When Green
+
+# Merges a `claude/issue-*` PR once its CI run and its Agent - Review run have
+# both passed on the PR's current head commit.
+#
+# Why: a private repository on GitHub's free plan cannot protect `main` with
+# required status checks, so `gh pr merge --auto` has nothing to wait for. In
+# practice the Implementer then merged its own PR seconds after opening it,
+# before CI and the review had run, or stopped and waited for a manual merge.
+# The Implementer now only opens the PR and this workflow is the gate. It needs
+# no repository settings, so it works the same on any plan. A failing CI or
+# review is left to agent-auto-retry.yml, as before.
+#
+# The merge uses PIPELINE_PAT, not GITHUB_TOKEN: events caused by GITHUB_TOKEN
+# trigger no workflows, and this merge must trigger Agent - Advance Queue
+# (pull_request closed) and any workflow that runs on a push to main.
+on:
+  workflow_run:
+    workflows: ["CI", "Agent - Review"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+# CI and the review usually finish minutes apart, each firing this workflow;
+# serialize per branch so only one of them can merge.
+concurrency:
+  group: agent-merge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: merge
+    # Only branches of this repository: in a public repository a fork can also
+    # name its branch `claude/issue-N`.
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'claude/issue-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # Needed for the local slack-notify composite action.
+      - uses: actions/checkout@v4
+
+      - name: Check CI and review on the PR head
+        id: gate
+        run: |
+          pr_json="$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+            --json number,headRefOid --jq '.[0] // empty')"
+          if [ -z "$pr_json" ]; then
+            echo "No open PR for $BRANCH (already merged or closed)."
+            exit 0
+          fi
+          pr="$(jq -r .number <<<"$pr_json")"
+          head="$(jq -r .headRefOid <<<"$pr_json")"
+          if [ "$head" != "$SHA" ]; then
+            echo "PR #$pr is now at $head; this run was for $SHA. The run for the new head decides."
+            exit 0
+          fi
+
+          # Both gates must have passed on this exact commit: the latest run of
+          # each workflow for it, so a re-run that passed counts.
+          for workflow in "CI" "Agent - Review"; do
+            state="$(gh run list --repo "$REPO" --workflow "$workflow" --commit "$SHA" \
+              --event pull_request --limit 1 --json status,conclusion \
+              --jq '.[0] | "\(.status)/\(.conclusion)"')"
+            echo "$workflow on $SHA: ${state:-no run}"
+            if [ "$state" != "completed/success" ]; then
+              echo "Not merging PR #$pr yet: waiting for $workflow."
+              exit 0
+            fi
+          done
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Merge
+        if: steps.gate.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_PAT }}
+          PR: ${{ steps.gate.outputs.pr }}
+        # --match-head-commit refuses the merge if a commit landed after the
+        # checks this decision is based on.
+        run: |
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$SHA"
+          echo "Merged PR #$PR at $SHA (CI and Agent - Review passed)."
+
+      - name: Notify Slack - merge failed
+        if: failure()
+        uses: ./.github/actions/slack-notify
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          text: |
+            :x: *Merge When Green failed* for ${{ github.event.workflow_run.head_branch }} (CI and review passed, the merge did not). Merge it by hand.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

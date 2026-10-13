@@ -2,7 +2,8 @@ name: Agent - Implement
 
 # Triggered when the `auto` label is added to an issue.
 # The Implementer agent reads the issue, implements a scoped change, runs the
-# checks on the runner, opens a PR that closes the issue, and arms auto-merge.
+# checks on the runner and opens a PR that closes the issue; agent-merge.yml
+# merges it once CI and the review pass.
 #
 # Gate: the `anthropic/claude-code-action` step can end its Claude Code session
 # with an internal error (e.g. an Anthropic API/auth failure on the very first
@@ -15,6 +16,13 @@ name: Agent - Implement
 # the run ended in error, so the steps after it can retry (up to 3 times, via
 # the same `retry-N` label convention as `agent-auto-retry.yml`) or escalate to
 # `needs-human`.
+#
+# A session can also end cleanly (`is_error=false`) having done nothing visible:
+# no PR and no comment (seen twice in a row on one issue). The Advance Queue only
+# moves on when a `claude/issue-*` PR merges, so that stalls the whole queue
+# silently. The gate therefore also fails when the run opened no PR for the issue
+# and posted no comment on it. The session transcript is uploaded as an artifact
+# so the reason can be read afterwards (the action hides it from the log).
 on:
   issues:
     types: [labeled]
@@ -38,7 +46,7 @@ jobs:
     # Only run for the dedicated trigger label.
     if: github.event.label.name == 'auto'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,6 +89,11 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # The gate below only counts a PR or comment made after this point.
+      - name: Record start time
+        id: start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Run Implementer agent
         id: implement
         uses: anthropics/claude-code-action@v1
@@ -118,36 +131,51 @@ jobs:
               --frozen-lockfile`, `pnpm lint`, `pnpm build`), fix any failures, then
               open a Pull Request whose body includes `Closes #${{ github.event.issue.number }}`.
 
-            After opening the PR, arm auto-merge so it merges once CI passes:
-            run `gh pr merge --auto --squash --delete-branch` on the PR you opened.
+            Do not merge the PR and do not arm auto-merge. agent-merge.yml merges
+            it once CI and the review have passed on it.
 
             Write everything in English.
           # The previous narrow Bash allowlist caused repeated permission denials
           # (the agent burned turns on `cd`, `mkdir`, and the env-prefixed test
           # command, then hit max-turns with permission_denials_count=12). The real
-          # security boundary is the ephemeral runner + a token scoped to `claude/*`
-          # branches (never `main`, which is protected) + no web tools — NOT a Bash
+          # security boundary is the ephemeral runner + no web tools — NOT a Bash
           # allowlist, which is moot once `python`/`node` are allowed (arbitrary code
           # anyway). So grant the file tools + Bash and keep web access disallowed.
+          # `main` has no branch protection and this token can merge, so denying
+          # `gh pr merge` only stops the agent's old habit of merging its own PR
+          # (it did so seconds after opening, before CI and the review ran);
+          # agent-merge.yml is the gate.
+          #
+          # `--max-turns`: raised 60 -> 100 after an issue (a multi-section
+          # frontend dashboard with a design-reference screenshot to read) hit
+          # `error_max_turns` on 3 consecutive attempts with permission_denials_count=0
+          # and no branch ever pushed — a genuinely larger task, not a stuck loop.
+          # `timeout-minutes` raised in step with it so the extra turns have room to run.
           claude_args: |
-            --model claude-opus-4-8
-            --max-turns 60
+            --model claude-opus-5-5
+            --max-turns 100
             --permission-mode acceptEdits
             --allowedTools "Edit,Write,Read,Glob,Grep,TodoWrite,Bash"
-            --disallowedTools "WebSearch,WebFetch"
+            --disallowedTools "WebSearch,WebFetch,Bash(gh pr merge:*)"
 
       # Fail-closed check on the actual Claude Code result, not just the GitHub
       # Actions step conclusion (which is "success" even when the agent's own
       # session ended in error). Mirrors the review gate in agent-review.yml.
+      # Sets `reason` (error | no_output) for the retry comment below.
       - name: Gate on implementer result
         id: gate
         if: always()
         env:
           EXECUTION_FILE: ${{ steps.implement.outputs.execution_file }}
           AGENT_OUTCOME: ${{ steps.implement.outcome }}
+          STARTED_AT: ${{ steps.start.outputs.at }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
           if [ -z "${EXECUTION_FILE}" ] || [ ! -f "${EXECUTION_FILE}" ]; then
             echo "::error::Implementer produced no execution file (agent step outcome: ${AGENT_OUTCOME}). Failing closed."
+            echo "reason=error" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -162,8 +190,42 @@ jobs:
 
           if [ "${is_error}" != "false" ]; then
             echo "::error::Implementer's Claude Code session ended in an internal error (is_error=${is_error:-unknown}, num_turns=${num_turns}) before it could open a PR or comment. Failing the job so it gets retried."
+            echo "reason=error" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+          # A clean session must have left something on GitHub: a PR for this
+          # issue (its branch is claude/issue-N, or its body closes #N), or a
+          # bot comment on the issue (the clarification path). Only what this
+          # run created counts.
+          prs="$(gh pr list --repo "$REPO" --state all --limit 30 --json headRefName,body,createdAt \
+            | jq --arg since "$STARTED_AT" --arg issue "$ISSUE" '[.[]
+                | select(.createdAt >= $since)
+                | select((.headRefName | test("^claude/issue-" + $issue + "($|[^0-9])"))
+                         or ((.body // "") | test("(?i)\\b(closes|fixes|resolves) #" + $issue + "\\b")))
+              ] | length')"
+          comments="$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments?since=$STARTED_AT" \
+            | jq -s --arg since "$STARTED_AT" '[.[][] | select(.created_at >= $since and .user.type == "Bot")] | length')"
+          echo "Since ${STARTED_AT}: PRs for #${ISSUE}=${prs} bot comments=${comments}"
+
+          if [ "${prs:-0}" -eq 0 ] && [ "${comments:-0}" -eq 0 ]; then
+            echo "::error::Implementer ended cleanly (num_turns=${num_turns}) but opened no PR for #${ISSUE} and posted no comment on it. Failing the job so it gets retried instead of stalling the queue."
+            echo "reason=no_output" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # The action hides the session from the log, so keep its transcript to
+      # see why a run ended the way it did. Anyone with read access to the
+      # repository can download it: in a public repository that is everyone, so
+      # drop this step there if the transcripts should stay private.
+      - name: Upload implementer transcript
+        if: always() && steps.implement.outputs.execution_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementer-transcript-issue-${{ github.event.issue.number }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.implement.outputs.execution_file }}
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Notify Slack - success
         if: success()
@@ -220,6 +282,7 @@ jobs:
           ISSUE: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           NEXT_RETRY: ${{ steps.retry.outputs.next_retry }}
+          REASON: ${{ steps.gate.outputs.reason }}
         run: |
           gh label create "retry-${NEXT_RETRY}" \
             --repo "$REPO" \
@@ -228,13 +291,22 @@ jobs:
 
           gh issue edit "$ISSUE" --repo "$REPO" --add-label "retry-${NEXT_RETRY}"
 
+          if [ "$REASON" = "no_output" ]; then
+            cause="The previous Implementer session ended without opening a PR for this
+          issue and without commenting on it. That is not allowed: this run must end
+          with either a PR whose body includes \`Closes #${ISSUE}\`, or one comment on
+          this issue saying what blocks it."
+          else
+            cause="The Implementer's Claude Code session ended in an internal error before it
+          could read the issue or open a PR (no code was written, no PR exists). This
+          is usually a transient Anthropic API/auth issue rather than a problem with
+          the issue itself."
+          fi
+
           gh issue comment "$ISSUE" --repo "$REPO" --body "$(cat <<BODY
           ### Auto-retry ${NEXT_RETRY}/3
 
-          The Implementer's Claude Code session ended in an internal error before it
-          could read the issue or open a PR (no code was written, no PR exists). This
-          is usually a transient Anthropic API/auth issue rather than a problem with
-          the issue itself. Re-triggering automatically.
+          ${cause} Re-triggering automatically.
           BODY
           )"
 
@@ -262,12 +334,14 @@ jobs:
           gh issue comment "$ISSUE" --repo "$REPO" --body "$(cat <<'BODY'
           ### Max retries reached (3/3)
 
-          The Implementer failed 3 consecutive times before it could even start work
-          (internal error each time, no PR ever opened). Automatic retries are exhausted.
+          The Implementer failed 3 consecutive times without opening a PR (an internal
+          error, or a session that ended with no PR and no comment). Automatic retries
+          are exhausted.
 
-          **Action required:** check the Implementer's Anthropic API/OAuth token status
-          (`CLAUDE_CODE_OAUTH_TOKEN`), then remove the `needs-human` label and re-add
-          `auto` to try again.
+          **Action required:** read the `implementer-transcript-*` artifacts of the
+          failed runs. If they show an internal error, check the Implementer's OAuth
+          token (`CLAUDE_CODE_OAUTH_TOKEN`). Then remove the `needs-human` label and
+          re-add `auto` to try again.
           BODY
           )"
 
@@ -277,7 +351,7 @@ jobs:
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           text: |
-            :arrows_counterclockwise: *Auto-retry ${{ steps.retry.outputs.next_retry }}/3* for issue #${{ github.event.issue.number }} — the Implementer's session errored before opening a PR. Re-running automatically.
+            :arrows_counterclockwise: *Auto-retry ${{ steps.retry.outputs.next_retry }}/3* for issue #${{ github.event.issue.number }} — the Implementer ended without opening a PR (${{ steps.gate.outputs.reason }}). Re-running automatically.
             ${{ github.event.issue.html_url }}
 
       - name: Notify Slack — needs human
@@ -286,5 +360,5 @@ jobs:
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           text: |
-            :sos: *Max retries reached* for issue #${{ github.event.issue.number }} — the Implementer errored 3 times without ever opening a PR. Human intervention required.
+            :sos: *Max retries reached* for issue #${{ github.event.issue.number }} — the Implementer failed 3 times without ever opening a PR. Human intervention required.
             ${{ github.event.issue.html_url }}

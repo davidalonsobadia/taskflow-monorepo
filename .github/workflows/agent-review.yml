@@ -1,10 +1,10 @@
 name: Agent - Review
 
 # Triggered when a PR is opened or updated. The Reviewer agent reviews the diff,
-# posts inline comments, and emits a PASS/BLOCK verdict. This job is meant to be a
-# REQUIRED status check on `main`: a BLOCK verdict (or a reviewer error) fails the
-# job, which holds the PR's auto-merge. It is read-only on the repository code: it
-# can never push or modify `main`.
+# posts inline comments, and emits a PASS/BLOCK verdict. agent-merge.yml merges a
+# `claude/issue-*` PR only once this job and CI have passed on its head: a BLOCK
+# verdict (or a reviewer error) fails the job, which holds the merge. It is
+# read-only on the repository code: it can never push or modify `main`.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -34,6 +34,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The gate below trusts review-verdict.txt. A PR that commits that file
+      # would otherwise pass this check whenever the reviewer ends without
+      # writing one (crash, turn cap), turning fail-closed into fail-open.
+      - name: Discard any verdict file from the PR
+        run: rm -f review-verdict.txt
+
       - name: Notify Slack - review started
         if: github.event.action == 'opened'
         uses: ./.github/actions/slack-notify
@@ -42,6 +48,28 @@ jobs:
           text: |
             :mag: *Review started* on PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}
             ${{ github.event.pull_request.html_url }}
+
+      # The linked issue is the spec the review checks the PR against. Saved inside
+      # the workspace so the agent can Read it; it is untracked, so it never shows
+      # in the diff. The agent treats it as untrusted input, like the diff.
+      - name: Collect the linked issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          out=".review-context/linked-issues.md"
+          mkdir -p .review-context
+          nums="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json closingIssuesReferences --jq '.closingIssuesReferences[].number')"
+          if [ -z "$nums" ]; then
+            echo "This PR closes no issue: there is no spec to check it against." > "$out"
+          else
+            for n in $nums; do
+              gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json number,title,body \
+                --jq '"# Issue #\(.number): \(.title)\n\n\(.body)\n"' >> "$out"
+            done
+          fi
+          wc -c "$out"
 
       - name: Run Reviewer agent
         id: review
@@ -58,35 +86,45 @@ jobs:
           track_progress: true
           prompt: |
             You are the read-only Reviewer for this repository. Operate exactly as
-            specified in `.claude/agents/reviewer.md` and check the change against
-            `CLAUDE.md`.
+            specified in `.claude/agents/reviewer.md`: read `REVIEW.md` (the
+            project's review rulebook) and `CLAUDE.md` first.
 
-            Review the diff of PR #${{ github.event.pull_request.number }} against the
-            base branch. Post specific, inline comments for correctness bugs, security
-            flaws, performance problems, and convention violations. Prominently flag
-            anything that could break `main` (prefix such comments with
-            `🚨 MAY BREAK MAIN:`). Do not edit source files, approve, or merge.
-            Write everything in English.
+            Review PR #${{ github.event.pull_request.number }} against
+            `origin/${{ github.event.pull_request.base.ref }}`. The issue(s) it
+            closes, which are its spec, are saved in
+            `.review-context/linked-issues.md`.
 
-            This review is a MERGE GATE. After reviewing, decide a single verdict and
-            make it your FINAL action — run exactly one of these shell commands, and
-            write nothing else to that file:
-              - `echo PASS > review-verdict.txt`  — the change is safe to merge
-                (no blocking issues; only nits/observations, if any).
-              - `echo BLOCK > review-verdict.txt` — there is at least one blocking
-                issue: a `🚨 MAY BREAK MAIN` item, a correctness bug, a security flaw,
-                or a must-fix convention violation (e.g. changed behavior with no
-                tests). When genuinely in doubt, choose BLOCK.
-            That verdict file is the ONLY file you may create; never edit repo source.
+            Post each finding as an inline comment with
+            `mcp__github_inline_comment__create_inline_comment`, and the summary in
+            the progress comment, in the formats `reviewer.md` defines. Do not edit
+            source files, approve, or merge. Write everything in English.
+
+            This review is a merge gate: `agent-merge.yml` merges the PR only if you
+            record PASS. As soon as you have decided, and before posting the summary,
+            run exactly one of `echo PASS > review-verdict.txt` or
+            `echo BLOCK > review-verdict.txt`, following the verdict rules in
+            `reviewer.md`. Overwrite it if you change your mind. That file is the
+            only one you may create.
           # Read/Glob/Grep let the reviewer read surrounding code for context
           # (previously denied, since only the two Bash patterns were allowed). It
           # stays strictly read-only: Edit/Write remain disallowed and the token is
           # `contents: read`, so it can analyze and comment but never modify code.
           # Bash is limited to git (diff) and echo (the PASS/BLOCK verdict file).
+          #
+          # `mcp__github_inline_comment__create_inline_comment`: the action installs
+          # its inline-comment server only when this tool is allowed. Without it the
+          # reviewer had no way to comment on lines, and posted 0 inline comments
+          # across ~195 runs on the first project that ran this pipeline.
+          #
+          # `--max-turns`: raised 20 -> 40. Over those runs the median review took
+          # 14 turns and the longest 33; 38 runs (~20%) hit the cap and ended with
+          # no verdict, some after already concluding PASS. Now that agent-merge.yml
+          # waits for this check, a capped run sends the PR to agent-auto-retry.yml,
+          # which closes it and re-implements the issue from scratch.
           claude_args: |
-            --model claude-sonnet-4-6
-            --max-turns 20
-            --allowedTools "Read,Glob,Grep,TodoWrite,Bash(git:*),Bash(echo:*)"
+            --model claude-sonnet-5-5
+            --max-turns 40
+            --allowedTools "Read,Glob,Grep,TodoWrite,Bash(git:*),Bash(echo:*),mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Edit,Write,WebSearch,WebFetch"
 
       # Turn the agent's verdict into the job's pass/fail status so it can gate the

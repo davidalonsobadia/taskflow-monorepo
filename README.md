@@ -45,7 +45,7 @@ cp backend/.env.example backend/.env
 # Create frontend/.env file
 cat > frontend/.env << EOF
 NEXT_PUBLIC_API_URL=http://api:8000
-NEXT_PUBLIC_API_KEY=your-api-key-here
+BACKEND_API_KEY=your-api-key-here
 NODE_ENV=production
 EOF
 ```
@@ -76,8 +76,11 @@ docker-compose exec api python scripts/create_api_client.py --name "frontend"
 **Important**: Copy the API key from the output and update `frontend/.env`:
 
 ```bash
-NEXT_PUBLIC_API_KEY=your-actual-api-key-here
+BACKEND_API_KEY=your-actual-api-key-here
 ```
+
+`BACKEND_API_KEY` is read by the Next.js server only, at runtime. Never give it a
+`NEXT_PUBLIC_` name: Next.js inlines those into the browser bundle.
 
 Then restart the frontend:
 
@@ -191,7 +194,7 @@ Key variables:
 #### Frontend (`frontend/.env`)
 
 - `NEXT_PUBLIC_API_URL` - Backend API URL (use `http://api:8000` in Docker)
-- `NEXT_PUBLIC_API_KEY` - API key for backend authentication
+- `BACKEND_API_KEY` - API key for backend authentication (server-only, read at runtime)
 - `NODE_ENV` - `production` or `development`
 
 ### Ports
@@ -228,7 +231,8 @@ docker-compose exec api bash
 
 ## 🔐 API Key Setup
 
-All requests to the backend API require an API key. The frontend automatically includes this in all requests.
+All requests to the backend API require an API key. The frontend's server-side route
+handlers (`app/api/**`) add it to every backend request; it never reaches the browser.
 
 1. **Create API key**:
    ```bash
@@ -237,7 +241,7 @@ All requests to the backend API require an API key. The frontend automatically i
 
 2. **Update frontend/.env**:
    ```bash
-   NEXT_PUBLIC_API_KEY=your-api-key-here
+   BACKEND_API_KEY=your-api-key-here
    ```
 
 3. **Restart frontend**:

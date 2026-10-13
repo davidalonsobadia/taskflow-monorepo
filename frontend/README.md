@@ -22,7 +22,9 @@ NEXT_PUBLIC_API_URL=http://host.docker.internal:8000
 
 # API Key (required - get it from the backend)
 # Create one with: docker-compose exec api python scripts/create_api_client.py --name "frontend"
-NEXT_PUBLIC_API_KEY=your-api-key-here
+# Read by the Next.js server at runtime only. Never use a NEXT_PUBLIC_ name for it:
+# Next.js would inline it into the browser bundle.
+BACKEND_API_KEY=your-api-key-here
 
 # Node Environment
 NODE_ENV=development
@@ -48,7 +50,7 @@ This will start only the frontend service. Make sure your backend API is accessi
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NEXT_PUBLIC_API_URL` | Backend API URL | `http://host.docker.internal:8000` |
-| `NEXT_PUBLIC_API_KEY` | API key for backend authentication | Required |
+| `BACKEND_API_KEY` | API key for backend authentication (server-only, read at runtime) | Required |
 | `NODE_ENV` | Node environment | `development` |
 | `FRONTEND_PORT` | Port to expose | `3000` |
 | `FRONTEND_BUILD_TARGET` | Docker build target | `development` |
@@ -150,7 +152,7 @@ This will use the shared network and can communicate with backend services.
 1. **Check backend is running**: `curl http://localhost:8000/api/v1/health`
 2. **Verify API URL**: Check `NEXT_PUBLIC_API_URL` in `.env`
 3. **Check network**: If using Docker, ensure services are on the same network
-4. **Verify API key**: Make sure `NEXT_PUBLIC_API_KEY` is set correctly
+4. **Verify API key**: Make sure `BACKEND_API_KEY` is set correctly
 
 ### Port already in use
 

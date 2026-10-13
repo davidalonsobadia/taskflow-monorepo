@@ -77,8 +77,7 @@ server. A client-side call either fails or needs the key in the browser.*
 **T6 · block · Nothing secret reaches the browser.** A `NEXT_PUBLIC_*` variable is
 inlined into the client bundle of every client component that imports the module
 reading it, so it never holds a secret. New secrets are read only in server code.
-*Why: the value ships to every visitor. Known exception: `NEXT_PUBLIC_API_KEY` in
-`lib/config.ts` predates this rule; a PR must not extend it.*
+*Why: the value ships to every visitor.*
 
 **T7 · block · Fields the frontend reads exist.** `next.config.mjs` ignores type
 errors, so `pnpm build` passes with a wrong field name. Every property the diff

@@ -67,9 +67,11 @@ your-api-key-here
 2. Create a `.env.local` file in the `frontend/` directory (or add to existing `.env`)
 3. Add the following:
    ```bash
-   NEXT_PUBLIC_API_KEY=your-api-key-here
+   BACKEND_API_KEY=your-api-key-here
    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
+   `BACKEND_API_KEY` is read by the Next.js server only; never give it a
+   `NEXT_PUBLIC_` name, or Next.js ships it to the browser.
 4. Restart your frontend development server
 
 ### **4. Access the Application**

@@ -4,9 +4,11 @@ export const config = {
     description: "Modern TODO list platform",
   },
   api: {
-    // Real backend API configuration
+    // Real backend API configuration.
+    // This module is imported by client components, so everything here ships to
+    // the browser. Never put a secret in it: the backend API key is read on the
+    // server only, in lib/api-client.ts.
     baseUrl: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-    apiKey: process.env.NEXT_PUBLIC_API_KEY || "PI1u-i-6i2pGeIi9q6OOaYYLc7BnjCHzJ58m0NEaIrM",
     endpoints: {
       // Backend API endpoints (v1)
       backend: {

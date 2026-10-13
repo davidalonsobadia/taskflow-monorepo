@@ -14,7 +14,8 @@ services:
       # Use 'http://host.docker.internal:8000' if backend is on host machine
       # Use 'http://localhost:8000' if backend is accessible via localhost
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://host.docker.internal:8000}
-      - NEXT_PUBLIC_API_KEY=${NEXT_PUBLIC_API_KEY}
+      # Read by the Next.js server at runtime; never expose it as NEXT_PUBLIC_*
+      - BACKEND_API_KEY=${BACKEND_API_KEY}
       - NODE_ENV=${NODE_ENV:-development}
     ports:
       # Expose port 3000 for local development (comment out for production)
